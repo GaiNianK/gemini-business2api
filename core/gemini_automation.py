@@ -1370,6 +1370,103 @@ class GeminiAutomation:
             time.sleep(1)
         return False
 
+    def _click_username_submit_button(self, page, timeout: int = 20) -> bool:
+        """姓名页兜底点击提交按钮：语义匹配 + 提交按钮兜底 + 多轮重试。"""
+        keywords = [
+            "continue", "next", "create", "start", "submit", "confirm", "done",
+            "继续", "下一步", "创建", "开始", "提交", "确认", "完成", "同意",
+        ]
+        selectors = [
+            "css:button[type='submit']",
+            "css:input[type='submit']",
+            "css:button[jsname]",
+            "css:[role='button']",
+            "css:div[role='button']",
+            "css:[mat-flat-button]",
+            "css:[mat-raised-button]",
+            "tag:button",
+            "tag:a",
+        ]
+
+        def _get_text(btn) -> str:
+            try:
+                text = (btn.text or "").strip()
+                if text:
+                    return text.lower()
+            except Exception:
+                pass
+            try:
+                text = str(btn.run_js("return (this.innerText || this.textContent || '').trim();") or "").strip()
+                if text:
+                    return text.lower()
+            except Exception:
+                pass
+            return ""
+
+        def _try_click(btn) -> bool:
+            try:
+                if not btn.is_displayed() or not btn.is_enabled():
+                    return False
+            except Exception:
+                return False
+            try:
+                btn.run_js("this.scrollIntoView({block:'center', inline:'center'});")
+            except Exception:
+                pass
+            try:
+                self._human_click(page, btn)
+                return True
+            except Exception:
+                try:
+                    btn.run_js("this.click();")
+                    return True
+                except Exception:
+                    return False
+
+        self._log("info", "🔎 姓名页：开始扫描可提交按钮（语义匹配）...")
+        deadline = time.time() + max(2, int(timeout))
+        while time.time() < deadline:
+            # 第一轮：优先文本与属性语义匹配
+            for selector in selectors:
+                try:
+                    for btn in page.eles(selector, timeout=1):
+                        try:
+                            text = _get_text(btn)
+                            aria = (btn.attr("aria-label") or "").strip().lower()
+                            title = (btn.attr("title") or "").strip().lower()
+                            merged = f"{text} {aria} {title}".strip()
+                            if merged and any(k in merged for k in keywords):
+                                if _try_click(btn):
+                                    return True
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # 第二轮：直接命中 submit 按钮（无文案场景）
+            for selector in ("css:button[type='submit']", "css:input[type='submit']"):
+                try:
+                    btn = page.ele(selector, timeout=1)
+                    if btn and _try_click(btn):
+                        return True
+                except Exception:
+                    continue
+
+            # 第三轮：form 容器内兜底
+            try:
+                forms = page.eles("tag:form", timeout=1)
+                for form in forms[:3]:
+                    for btn in form.eles("tag:button"):
+                        if _try_click(btn):
+                            return True
+            except Exception:
+                pass
+
+            time.sleep(0.6)
+
+        self._log("warning", "⚠️ 姓名页：重试后仍未找到可用提交按钮")
+        return False
+
     def _handle_username_setup(self, page, is_new_account: bool = False) -> bool:
         """处理用户名设置页面（is_new_account=True 时启用按钮兜底和延长超时）"""
         current_url = page.url
@@ -1426,24 +1523,28 @@ class GeminiAutomation:
                 username_input.input(name)
                 time.sleep(0.3)
 
+            # 某些页面在 blur/change 后才会激活提交按钮
+            try:
+                username_input.run_js(
+                    "this.dispatchEvent(new Event('input', {bubbles:true}));"
+                    "this.dispatchEvent(new Event('change', {bubbles:true}));"
+                    "this.blur();"
+                )
+            except Exception:
+                pass
+
             # 回车提交
             username_input.input("\n")
 
             if is_new_account:
                 # 注册专用：回车后等待1.5秒，若未跳转则用按钮兜底
                 time.sleep(random.uniform(1.5, 3))
-                if "cid" not in page.url:
+                if "cid" not in (page.url or ""):
                     self._log("info", "⌨️ 回车未跳转，尝试点击提交按钮...")
                     try:
-                        for btn in page.eles("tag:button"):
-                            try:
-                                if btn.is_displayed() and btn.is_enabled():
-                                    btn.click()
-                                    self._log("info", "✅ 已点击提交按钮（兜底）")
-                                    time.sleep(1)
-                                    break
-                            except Exception:
-                                continue
+                        if self._click_username_submit_button(page, timeout=20):
+                            self._log("info", "✅ 已点击提交按钮（兜底）")
+                            time.sleep(random.uniform(1.0, 2.0))
                     except Exception as e:
                         self._log("warning", f"⚠️ 按钮兜底失败: {e}")
 
